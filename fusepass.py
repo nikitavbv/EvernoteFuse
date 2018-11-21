@@ -5,151 +5,151 @@ import logging
 
 from collections import defaultdict
 from errno import ENOENT
-from stat import S_IFDIR, S_IFLNK, S_IFREG
+from stat import S_IFMT, S_IMODE, S_IFDIR
 from time import time
 
-from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
-
-if not hasattr(__builtins__, 'bytes'):
-    bytes = str
+from lib.fusell import FUSELL
 
 
-class Memory(LoggingMixIn, Operations):
-    'Example memory filesystem. Supports only one level of files.'
+class Memory(FUSELL):
+    def create_ino(self):
+        self.ino += 1
+        return self.ino
 
-    def __init__(self):
-        self.files = {}
+    def init(self, userdata, conn):
+        self.ino = 1
+        self.attr = defaultdict(dict)
         self.data = defaultdict(bytes)
-        self.fd = 0
-        now = time()
-        self.files['/'] = dict(
-            st_mode=(S_IFDIR | 0o755),
-            st_ctime=now,
-            st_mtime=now,
-            st_atime=now,
+        self.parent = {}
+        self.children = defaultdict(dict)
+
+        self.attr[1] = dict(
+            st_ino=1,
+            st_mode=S_IFDIR | 0o777,
             st_nlink=2)
+        self.parent[1] = 1
 
-    def chmod(self, path, mode):
-        self.files[path]['st_mode'] &= 0o770000
-        self.files[path]['st_mode'] |= mode
-        return 0
+    def getattr(self, req, ino, fi):
+        print('getattr:', ino)
+        attr = self.attr[ino]
+        if attr:
+            self.reply_attr(req, attr, 1.0)
+        else:
+            self.reply_err(req, ENOENT)
 
-    def chown(self, path, uid, gid):
-        self.files[path]['st_uid'] = uid
-        self.files[path]['st_gid'] = gid
+    def lookup(self, req, parent, name):
+        print('lookup:', parent, name)
+        children = self.children[parent]
+        ino = children.get(name, 0)
+        attr = self.attr[ino]
 
-    def create(self, path, mode):
-        self.files[path] = dict(
-            st_mode=(S_IFREG | mode),
-            st_nlink=1,
-            st_size=0,
-            st_ctime=time(),
-            st_mtime=time(),
-            st_atime=time())
+        if attr:
+            entry = dict(
+                ino=ino,
+                attr=attr,
+                attr_timeout=1.0,
+                entry_timeout=1.0)
+            self.reply_entry(req, entry)
+        else:
+            self.reply_err(req, ENOENT)
 
-        self.fd += 1
-        return self.fd
-
-    def getattr(self, path, fh=None):
-        if path not in self.files:
-            raise FuseOSError(ENOENT)
-
-        return self.files[path]
-
-    def getxattr(self, path, name, position=0):
-        attrs = self.files[path].get('attrs', {})
-
-        try:
-            return attrs[name]
-        except KeyError:
-            return ''       # Should return ENOATTR
-
-    def listxattr(self, path):
-        attrs = self.files[path].get('attrs', {})
-        return attrs.keys()
-
-    def mkdir(self, path, mode):
-        self.files[path] = dict(
-            st_mode=(S_IFDIR | mode),
-            st_nlink=2,
-            st_size=0,
-            st_ctime=time(),
-            st_mtime=time(),
-            st_atime=time())
-
-        self.files['/']['st_nlink'] += 1
-
-    def open(self, path, flags):
-        self.fd += 1
-        return self.fd
-
-    def read(self, path, size, offset, fh):
-        return self.data[path][offset:offset + size]
-
-    def readdir(self, path, fh):
-        return ['.', '..'] + [x[1:] for x in self.files if x != '/']
-
-    def readlink(self, path):
-        return self.data[path]
-
-    def removexattr(self, path, name):
-        attrs = self.files[path].get('attrs', {})
-
-        try:
-            del attrs[name]
-        except KeyError:
-            pass        # Should return ENOATTR
-
-    def rename(self, old, new):
-        self.data[new] = self.data.pop(old)
-        self.files[new] = self.files.pop(old)
-
-    def rmdir(self, path):
-        # with multiple level support, need to raise ENOTEMPTY if contains any files
-        self.files.pop(path)
-        self.files['/']['st_nlink'] -= 1
-
-    def setxattr(self, path, name, value, options, position=0):
-        # Ignore options
-        attrs = self.files[path].setdefault('attrs', {})
-        attrs[name] = value
-
-    def statfs(self, path):
-        return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
-
-    def symlink(self, target, source):
-        self.files[target] = dict(
-            st_mode=(S_IFLNK | 0o777),
-            st_nlink=1,
-            st_size=len(source))
-
-        self.data[target] = source
-
-    def truncate(self, path, length, fh=None):
-        # make sure extending the file fills in zero bytes
-        self.data[path] = self.data[path][:length].ljust(
-            length, '\x00'.encode('ascii'))
-        self.files[path]['st_size'] = length
-
-    def unlink(self, path):
-        self.data.pop(path)
-        self.files.pop(path)
-
-    def utimens(self, path, times=None):
+    def mkdir(self, req, parent, name, mode):
+        print('mkdir:', parent, name)
+        ino = self.create_ino()
+        ctx = self.req_ctx(req)
         now = time()
-        atime, mtime = times if times else (now, now)
-        self.files[path]['st_atime'] = atime
-        self.files[path]['st_mtime'] = mtime
+        attr = dict(
+            st_ino=ino,
+            st_mode=S_IFDIR | mode,
+            st_nlink=2,
+            st_uid=ctx['uid'],
+            st_gid=ctx['gid'],
+            st_atime=now,
+            st_mtime=now,
+            st_ctime=now)
 
-    def write(self, path, data, offset, fh):
-        self.data[path] = (
-            # make sure the data gets inserted at the right offset
-            self.data[path][:offset].ljust(offset, '\x00'.encode('ascii'))
-            + data
-            # and only overwrites the bytes that data is replacing
-            + self.data[path][offset + len(data):])
-        self.files[path]['st_size'] = len(self.data[path])
-        return len(data)
+        self.attr[ino] = attr
+        self.attr[parent]['st_nlink'] += 1
+        self.parent[ino] = parent
+        self.children[parent][name] = ino
+
+        entry = dict(
+            ino=ino,
+            attr=attr,
+            attr_timeout=1.0,
+            entry_timeout=1.0)
+        self.reply_entry(req, entry)
+
+    def mknod(self, req, parent, name, mode, rdev):
+        print('mknod:', parent, name)
+        ino = self.create_ino()
+        ctx = self.req_ctx(req)
+        now = time()
+        attr = dict(
+            st_ino=ino,
+            st_mode=mode,
+            st_nlink=1,
+            st_uid=ctx['uid'],
+            st_gid=ctx['gid'],
+            st_rdev=rdev,
+            st_atime=now,
+            st_mtime=now,
+            st_ctime=now)
+
+        self.attr[ino] = attr
+        self.attr[parent]['st_nlink'] += 1
+        self.children[parent][name] = ino
+
+        entry = dict(
+            ino=ino,
+            attr=attr,
+            attr_timeout=1.0,
+            entry_timeout=1.0)
+        self.reply_entry(req, entry)
+
+    def open(self, req, ino, fi):
+        print('open:', ino)
+        self.reply_open(req, fi)
+
+    def read(self, req, ino, size, off, fi):
+        print('read:', ino, size, off)
+        buf = self.data[ino][off:(off + size)]
+        self.reply_buf(req, buf)
+
+    def readdir(self, req, ino, size, off, fi):
+        print('readdir:', ino)
+        parent = self.parent[ino]
+        entries = [
+            ('.', {'st_ino': ino, 'st_mode': S_IFDIR}),
+            ('..', {'st_ino': parent, 'st_mode': S_IFDIR})]
+        for name, child in self.children[ino].items():
+            entries.append((name, self.attr[child]))
+        self.reply_readdir(req, size, off, entries)
+
+    def rename(self, req, parent, name, newparent, newname):
+        print('rename:', parent, name, newparent, newname)
+        ino = self.children[parent].pop(name)
+        self.children[newparent][newname] = ino
+        self.parent[ino] = newparent
+        self.reply_err(req, 0)
+
+    def setattr(self, req, ino, attr, to_set, fi):
+        print('setattr:', ino, to_set)
+        a = self.attr[ino]
+        for key in to_set:
+            if key == 'st_mode':
+                # Keep the old file type bit fields
+                a['st_mode'] = S_IFMT(a['st_mode']) | S_IMODE(attr['st_mode'])
+            else:
+                a[key] = attr[key]
+        self.attr[ino] = a
+        self.reply_attr(req, a, 1.0)
+
+    def write(self, req, ino, buf, off, fi):
+        print('write:', ino, off, len(buf))
+        self.data[ino] = self.data[ino][:off] + buf
+        self.attr[ino]['st_size'] = len(self.data[ino])
+        self.reply_write(req, len(buf))
 
 
 if __name__ == '__main__':
@@ -159,4 +159,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG)
-    fuse = FUSE(Memory(), args.mount, foreground=True, allow_other=True)
+    fuse = Memory(args.mount)
