@@ -1,33 +1,107 @@
 #!/usr/bin/env python
 from __future__ import print_function, absolute_import, division
 
-import logging
-
 from collections import defaultdict
 from errno import ENOENT
 from stat import S_IFMT, S_IMODE, S_IFDIR
 from time import time
+import logging
 
 from lib.fusell import FUSELL
 
 
-class Memory(FUSELL):
-    def create_ino(self):
-        self.ino += 1
-        return self.ino
+class EvernoteFuse(FUSELL):
 
-    def init(self, userdata, conn):
-        self.ino = 1
+    def __init__(self, mount_point, evernote):
+        """
+        Evernote fuse
+
+        :type evernote: evernote.api.client.EvernoteClient
+        """
+        self.evernote = evernote
+
+        self.notebooks = {}
+        self.notebook_ino = {}
+        self.root_ino = 1
+
+        self.ino = self.root_ino
         self.attr = defaultdict(dict)
         self.data = defaultdict(bytes)
         self.parent = {}
         self.children = defaultdict(dict)
 
+        self.note_store = self.evernote.get_note_store()
+
+        super(EvernoteFuse, self).__init__(mount_point)
+
+    def sync_notebooks(self):
+        logging.info('sync: notebooks')
+
+        prev_notebooks = self.notebooks.copy()
+
+        for notebook in self.note_store.listNotebooks():
+            self.notebooks[notebook.guid] = notebook
+            if notebook.guid not in prev_notebooks:
+                logging.info('sync: new notebook: ' + notebook.name)
+                self.add_notebook_to_fuse(notebook.guid)
+            elif notebook.name != prev_notebooks[notebook.guid].name:
+                logging.info('sync: notebook renamed: ' + prev_notebooks[notebook.guid].name + '->' + notebook.name)
+                self.rename_notebook_in_fuse(notebook.guid, prev_notebooks[notebook.guid].name, notebook.name)
+
+        for prev_notebook_guid, prev_notebook in prev_notebooks.items():
+            logging.info('sync: notebook deleted: ' + prev_notebook.name)
+            self.remove_notebook_from_fuse(prev_notebook_guid)
+
+    def rename_notebook_in_fuse(self, prev_name, new_name):
+        self.children[self.root_ino][new_name] = self.children[self.root_ino][prev_name]
+        del self.children[self.root_ino][prev_name]
+
+    def remove_notebook_from_fuse(self, notebook_guid):
+        ino = self.notebook_ino[notebook_guid]
+        notebook_name = self.notebooks[notebook_guid].name
+
+        del self.notebook_ino[notebook_guid]
+        del self.children[self.root_ino][notebook_name]
+        del self.parent[ino]
+        self.attr[self.root_ino]['st_nlink'] -= 1
+        del self.attr[ino]
+
+    def add_notebook_to_fuse(self, notebook_guid):
+        ino = self.create_ino()
+        now = time()
+
+        attr = dict(
+            st_ino=ino,
+            st_mode=S_IFDIR | 0o777,
+            st_nlink=2,
+            st_atime=now,
+            st_mtime=now,
+            st_ctime=now
+        )
+        if 'st_uid' in self.attr[self.root_ino]:
+            attr['st_uid'] = self.attr[self.root_ino]['st_uid']
+        if 'st_gid' in self.attr[self.root_ino]:
+            attr['st_gid'] = self.attr[self.root_ino]['st_gid']
+
+        self.attr[ino] = attr
+        self.attr[self.root_ino]['st_nlink'] += 1
+        self.parent[ino] = self.root_ino
+        self.children[self.root_ino][self.notebooks[notebook_guid].name] = ino
+
+        self.notebook_ino[notebook_guid] = ino
+
+    def create_ino(self):
+        self.ino += 1
+        return self.ino
+
+    def init(self, userdata, conn):
         self.attr[1] = dict(
             st_ino=1,
             st_mode=S_IFDIR | 0o777,
             st_nlink=2)
         self.parent[1] = 1
+
+        self.sync_notebooks()
 
     def getattr(self, req, ino, fi):
         print('getattr:', ino)
@@ -39,6 +113,7 @@ class Memory(FUSELL):
 
     def lookup(self, req, parent, name):
         print('lookup:', parent, name)
+        print(self.children[self.root_ino])
         children = self.children[parent]
         ino = children.get(name, 0)
         attr = self.attr[ino]
@@ -54,7 +129,8 @@ class Memory(FUSELL):
             self.reply_err(req, ENOENT)
 
     def mkdir(self, req, parent, name, mode):
-        print('mkdir:', parent, name)
+        print('mkdir:', parent, name, mode)
+        # 493 for drwxr-xr-x
         ino = self.create_ino()
         ctx = self.req_ctx(req)
         now = time()
@@ -151,12 +227,20 @@ class Memory(FUSELL):
         self.attr[ino]['st_size'] = len(self.data[ino])
         self.reply_write(req, len(buf))
 
+    def rmdir(self, req, parent, name):
+        ino = self.children[parent][name]
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('mount')
-    args = parser.parse_args()
+        del self.children[parent][name]
+        del self.parent[ino]
+        self.attr[parent]['st_nlink'] -= 1
+        del self.attr[ino]
 
-    logging.basicConfig(level=logging.DEBUG)
-    fuse = Memory(args.mount)
+        self.reply_err(req, 0)
+
+    def unlink(self, req, parent, name):
+        ino = self.children[parent][name]
+        del self.children[parent][name]
+        self.attr[parent]['st_nlink'] -= 1
+        del self.attr[ino]
+
+        self.reply_err(req, 0)

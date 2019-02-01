@@ -11,17 +11,22 @@ import config
 EVERNOTE_TOKEN_FILE = '.evernote_token'
 OAUTH_URL = 'http://localhost'
 
+
 def main():
     logging.basicConfig(level=logging.DEBUG)
     if not mount_point_exists():
         mount_point_create()
 
     client = EvernoteClient(token=get_evernote_token())
-    user_store = client.get_user_store()
-    print(user_store.getUser())
+    # note_store = client.get_note_store()
+    # notebooks = note_store.listNotebooks()
+    # print(notebooks[0])
+    # note_filter = NoteFilter()
+    # note_filter.notebookGuid = notebooks[0].guid
+    # note_list = note_store.findNotes(note_filter, 0, 1001)
+    # print(note_list)
 
-    fuse = fusepass.Memory(config.MOUNT_POINT)
-
+    fusepass.EvernoteFuse(config.MOUNT_POINT, client)
 
 
 def mount_point_exists():
