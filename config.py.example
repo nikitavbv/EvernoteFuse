@@ -1,0 +1,5 @@
+CONSUMER_KEY = 'your_key'
+CONSUMER_SECRET = 'your_secret'
+SANDBOX = True
+
+MOUNT_POINT = '/mnt/evernote'
