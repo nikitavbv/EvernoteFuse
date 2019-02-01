@@ -5,9 +5,15 @@ from collections import defaultdict
 from errno import ENOENT
 from stat import S_IFMT, S_IMODE, S_IFDIR
 from time import time
+from os import path
 import logging
+import pickle
+
+import config
 
 from lib.fusell import FUSELL
+
+EVERNOTE_DATA_FILE = '.evernote_data'
 
 
 class EvernoteFuse(FUSELL):
@@ -22,19 +28,37 @@ class EvernoteFuse(FUSELL):
 
         self.notebooks = {}
         self.notebook_ino = {}
-        self.root_ino = 1
+        self.notebooks_sync_time = 0
 
+        self.root_ino = 1
         self.ino = self.root_ino
         self.attr = defaultdict(dict)
         self.data = defaultdict(bytes)
         self.parent = {}
         self.children = defaultdict(dict)
 
+        if path.exists(EVERNOTE_DATA_FILE):
+            for k, v in pickle.load(open(EVERNOTE_DATA_FILE, 'rb')).items():
+                self.__setattr__(k, v)
+
         self.note_store = self.evernote.get_note_store()
 
         super(EvernoteFuse, self).__init__(mount_point)
 
+    def destroy(self, user_data):
+        """
+        save all data to file here, to do less syncing next time
+        """
+        pickle.dump({
+            'notebooks': self.notebooks,
+            'notebooks_sync_time': self.notebooks_sync_time,
+        }, open(EVERNOTE_DATA_FILE, 'wb'))
+
     def sync_notebooks(self):
+        if self.notebooks_sync_time + config.NOTEBOOK_SYNC_PERIOD > time():
+            # it is too early to sync
+            return
+
         logging.info('sync: notebooks')
 
         prev_notebooks = self.notebooks.copy()
@@ -46,11 +70,15 @@ class EvernoteFuse(FUSELL):
                 self.add_notebook_to_fuse(notebook.guid)
             elif notebook.name != prev_notebooks[notebook.guid].name:
                 logging.info('sync: notebook renamed: ' + prev_notebooks[notebook.guid].name + '->' + notebook.name)
-                self.rename_notebook_in_fuse(notebook.guid, prev_notebooks[notebook.guid].name, notebook.name)
+                self.rename_notebook_in_fuse(prev_notebooks[notebook.guid].name, notebook.name)
 
         for prev_notebook_guid, prev_notebook in prev_notebooks.items():
-            logging.info('sync: notebook deleted: ' + prev_notebook.name)
-            self.remove_notebook_from_fuse(prev_notebook_guid)
+            if prev_notebook_guid not in self.notebooks:
+                logging.info('sync: notebook deleted: ' + prev_notebook.name)
+                self.remove_notebook_from_fuse(prev_notebook_guid)
+
+        self.notebooks_sync_time = time()
+        logging.info('sync: notebooks - done')
 
     def rename_notebook_in_fuse(self, prev_name, new_name):
         self.children[self.root_ino][new_name] = self.children[self.root_ino][prev_name]
@@ -100,6 +128,9 @@ class EvernoteFuse(FUSELL):
             st_mode=S_IFDIR | 0o777,
             st_nlink=2)
         self.parent[1] = 1
+
+        for notebook_guid in self.notebooks:
+            self.add_notebook_to_fuse(notebook_guid)
 
         self.sync_notebooks()
 

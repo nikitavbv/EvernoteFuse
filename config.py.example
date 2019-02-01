@@ -3,3 +3,6 @@ CONSUMER_SECRET = 'your_secret'
 SANDBOX = True
 
 MOUNT_POINT = '/mnt/evernote'
+
+NOTEBOOK_SYNC_PERIOD = 60 * 60  # once an hour
+NOTES_SYNC_PERIOD = 60 * 60  # once an hour
