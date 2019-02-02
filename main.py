@@ -18,19 +18,11 @@ def main():
         mount_point_create()
 
     client = EvernoteClient(token=get_evernote_token())
-    # note_store = client.get_note_store()
-    # notebooks = note_store.listNotebooks()
-    # print(notebooks[0])
-    # note_filter = NoteFilter()
-    # note_filter.notebookGuid = notebooks[0].guid
-    # note_list = note_store.findNotes(note_filter, 0, 1001)
-    # print(note_list)
-
     fusepass.EvernoteFuse(config.MOUNT_POINT, client)
 
 
 def mount_point_exists():
-    return os.path.isdir(config.MOUNT_POINT)
+    return os.path.exists(config.MOUNT_POINT)
 
 
 def mount_point_create():

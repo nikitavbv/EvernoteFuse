@@ -13,7 +13,10 @@ import config
 
 from lib.fusell import FUSELL
 
+from evernote.edam.notestore.ttypes import NoteFilter
+
 EVERNOTE_DATA_FILE = '.evernote_data'
+NOTES_LOAD_BATCH_SIZE = 100
 
 
 class EvernoteFuse(FUSELL):
@@ -29,6 +32,9 @@ class EvernoteFuse(FUSELL):
         self.notebooks = {}
         self.notebook_ino = {}
         self.notebooks_sync_time = 0
+
+        self.notebooks_notes_sync_time = {}
+        self.notebook_notes = {}
 
         self.root_ino = 1
         self.ino = self.root_ino
@@ -52,10 +58,63 @@ class EvernoteFuse(FUSELL):
         pickle.dump({
             'notebooks': self.notebooks,
             'notebooks_sync_time': self.notebooks_sync_time,
+            'notebooks_notes_sync_time': self.notebooks_notes_sync_time,
+            'notebook_notes': self.notebook_notes,
         }, open(EVERNOTE_DATA_FILE, 'wb'))
 
+    def should_sync_notebook_notes(self, notebook):
+        return (notebook.guid not in self.notebooks_notes_sync_time or
+                self.notebooks_notes_sync_time[notebook.guid] + config.NOTEBOOK_NOTES_SYNC_PERIOD <= time())
+
+    def sync_notebook_notes(self, notebook):
+        if not self.should_sync_notebook_notes(notebook):
+            return
+
+        logging.info('sync notebook: ' + notebook.name)
+        note_filter = NoteFilter()
+        note_filter.notebookGuid = notebook.guid
+
+        note_list = []
+        current_offset = 0
+        while True:
+            logging.info('sync notebook: ' + notebook.name + ' - ' + str(current_offset))
+            note_batch = self.note_store.findNotes(note_filter, current_offset, NOTES_LOAD_BATCH_SIZE + 1)
+            if len(note_batch.notes) < NOTES_LOAD_BATCH_SIZE + 1:
+                note_list += note_batch.notes
+                break
+            else:
+                note_list += note_batch.notes[:-1]
+                current_offset += NOTES_LOAD_BATCH_SIZE
+
+        if notebook.guid in self.notebook_notes:
+            prev_notes = self.notebook_notes[notebook.guid].copy()
+        else:
+            prev_notes = {}
+        new_notes = {}
+
+        for note in note_list:
+            new_notes[note.guid] = note
+            if note.guid not in prev_notes:
+                logging.info('sync new note: ' + note.title)
+                self.add_notebook_note_to_fuse(note)
+            elif note.title != prev_notes[note.guid].title:
+                logging.info('sync note renamed: ' + prev_notes[note.guid].title + '->' + note.title)
+                self.rename_notebook_note_in_fuse(note.notebookGuid, prev_notes[note.guid].title, note.title)
+
+        for prev_note_guid, prev_note in prev_notes.items():
+            if prev_note_guid not in new_notes:
+                logging.info('sync: note deleted: ' + prev_note.name)
+                self.remove_notebook_note_from_fuse(prev_note.notebookGuid, prev_note_guid)
+
+        self.notebook_notes[notebook.guid] = new_notes
+        logging.info('sync notebook - done: ' + notebook.name)
+        self.notebooks_notes_sync_time[notebook.guid] = time()
+
+    def should_sync_notebooks(self):
+        return self.notebooks_sync_time + config.NOTEBOOK_SYNC_PERIOD <= time()
+
     def sync_notebooks(self):
-        if self.notebooks_sync_time + config.NOTEBOOK_SYNC_PERIOD > time():
+        if not self.should_sync_notebooks():
             # it is too early to sync
             return
 
@@ -79,6 +138,49 @@ class EvernoteFuse(FUSELL):
 
         self.notebooks_sync_time = time()
         logging.info('sync: notebooks - done')
+
+    def remove_notebook_note_from_fuse(self, notebook_guid, note_guid):
+        parent = self.notebook_ino[notebook_guid]
+        note_name = self.notebook_notes[notebook_guid][note_guid]
+        ino = self.children[parent][note_name]
+
+        del self.children[parent][note_name]
+        self.attr[parent]['st_nlink'] -= 1
+        del self.attr[ino]
+
+    def rename_notebook_note_in_fuse(self, notebook_guid, prev_name, new_name):
+        parent = self.notebook_ino[notebook_guid]
+        self.children[parent][new_name] = self.children[parent][prev_name]
+        del self.children[parent][prev_name]
+
+    def add_notebook_note_to_fuse(self, note):
+        ino = self.create_ino()
+        now = time()
+        print(note)
+        attr = dict(
+            st_ino=ino,
+            st_mode=0o100664,
+            st_nlink=1,
+            ct_rdev=0,
+            st_atime=now,
+            st_mtime=note.updated,
+            st_ctime=note.created,
+            st_size=note.contentLength,
+        )
+        if 'st_uid' in self.attr[self.root_ino]:
+            attr['st_uid'] = self.attr[self.root_ino]['st_uid']
+        if 'st_gid' in self.attr[self.root_ino]:
+            attr['st_gid'] = self.attr[self.root_ino]['st_gid']
+
+        parent = self.notebook_ino[note.notebookGuid]
+        self.attr[ino] = attr
+        self.attr[parent]['st_nlink'] += 1
+        self.children[parent][note.title] = ino
+
+    def add_notebook_notes_to_fuse(self, notebook_guid):
+        notebook_notes = self.notebook_notes[notebook_guid]
+        for note in notebook_notes.values():
+            self.add_notebook_note_to_fuse(note)
 
     def rename_notebook_in_fuse(self, prev_name, new_name):
         self.children[self.root_ino][new_name] = self.children[self.root_ino][prev_name]
@@ -118,6 +220,12 @@ class EvernoteFuse(FUSELL):
 
         self.notebook_ino[notebook_guid] = ino
 
+    def get_notebook_by_ino(self, ino):
+        for notebook_guid, notebook_ino in self.notebook_ino.items():
+            if notebook_ino == ino:
+                return self.notebooks[notebook_guid]
+        raise AssertionError("Notebook with ino not found: " + ino)
+
     def create_ino(self):
         self.ino += 1
         return self.ino
@@ -131,6 +239,8 @@ class EvernoteFuse(FUSELL):
 
         for notebook_guid in self.notebooks:
             self.add_notebook_to_fuse(notebook_guid)
+            if notebook_guid in self.notebook_notes:
+                self.add_notebook_notes_to_fuse(notebook_guid)
 
         self.sync_notebooks()
 
@@ -188,7 +298,7 @@ class EvernoteFuse(FUSELL):
         self.reply_entry(req, entry)
 
     def mknod(self, req, parent, name, mode, rdev):
-        print('mknod:', parent, name)
+        print('mknod:', parent, name, mode, rdev)
         ino = self.create_ino()
         ctx = self.req_ctx(req)
         now = time()
@@ -229,8 +339,13 @@ class EvernoteFuse(FUSELL):
         entries = [
             ('.', {'st_ino': ino, 'st_mode': S_IFDIR}),
             ('..', {'st_ino': parent, 'st_mode': S_IFDIR})]
+
+        if ino in self.notebook_ino.values():
+            self.sync_notebook_notes(self.get_notebook_by_ino(ino))
+
         for name, child in self.children[ino].items():
             entries.append((name, self.attr[child]))
+
         self.reply_readdir(req, size, off, entries)
 
     def rename(self, req, parent, name, newparent, newname):
