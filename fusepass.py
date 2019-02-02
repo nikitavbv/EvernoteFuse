@@ -156,7 +156,6 @@ class EvernoteFuse(FUSELL):
     def add_notebook_note_to_fuse(self, note):
         ino = self.create_ino()
         now = time()
-        print(note)
         attr = dict(
             st_ino=ino,
             st_mode=0o100664,
