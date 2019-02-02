@@ -18,6 +18,9 @@ from evernote.edam.notestore.ttypes import NoteFilter
 EVERNOTE_DATA_FILE = '.evernote_data'
 NOTES_LOAD_BATCH_SIZE = 100
 
+NOTE_HEAD_1 = '''<?xml version="1.0" encoding="UTF-8"?>'''
+NOTE_HEAD_2 = '''<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">'''
+NOTE_HEAD_3 = '''<!DOCTYPE en-note SYSTEM 'http://xml.evernote.com/pub/enml2.dtd'>'''
 
 class EvernoteFuse(FUSELL):
 
@@ -35,6 +38,8 @@ class EvernoteFuse(FUSELL):
 
         self.notebooks_notes_sync_time = {}
         self.notebook_notes = {}
+        self.notes_ino = {}
+        self.note_sync_time = {}
 
         self.root_ino = 1
         self.ino = self.root_ino
@@ -60,7 +65,46 @@ class EvernoteFuse(FUSELL):
             'notebooks_sync_time': self.notebooks_sync_time,
             'notebooks_notes_sync_time': self.notebooks_notes_sync_time,
             'notebook_notes': self.notebook_notes,
+            'note_sync_time': self.note_sync_time,
+            'data': self.data,
         }, open(EVERNOTE_DATA_FILE, 'wb'))
+
+    def should_sync_note(self, note):
+        return (note.guid not in self.note_sync_time or
+                self.note_sync_time[note.guid] + config.NOTE_SYNC_PERIOD <= time())
+
+    def get_note_ino(self, note_guid):
+        for ino, note in self.notes_ino.items():
+            if note.guid == note_guid:
+                return ino
+
+    def sync_note(self, note):
+        if not self.should_sync_note(note):
+            return
+
+        logging.info('sync note: ' + note.title)
+        ino = self.get_note_ino(note.guid)
+
+        note_content = self.note_store.getNoteContent(note.guid)
+        note_content = note_content.strip()
+        if note_content.startswith(NOTE_HEAD_1):
+            note_content = note_content.replace(NOTE_HEAD_1, '', 1).strip()
+        if note_content.startswith(NOTE_HEAD_2):
+            note_content = note_content.replace(NOTE_HEAD_2, '', 1).strip()
+        if note_content.startswith(NOTE_HEAD_3):
+            note_content = note_content.replace(NOTE_HEAD_3, '', 1).strip()
+        if not note_content.startswith('<en-note>'):
+            raise AssertionError('Note "' + note.title + '" has invalid root tag: ' + note_content)
+
+        note_content = note_content[len('<en-note>'):len(note_content) - len('</en-note>')].strip()
+
+        note_content_bytes = note_content.encode('utf-8')
+        self.data[ino] = note_content_bytes
+        self.attr[ino]['st_size'] = len(note_content_bytes)
+
+        self.note_sync_time[note.guid] = time()
+        logging.info('sync note - done: ' + note.title)
+
 
     def should_sync_notebook_notes(self, notebook):
         return (notebook.guid not in self.notebooks_notes_sync_time or
@@ -148,6 +192,8 @@ class EvernoteFuse(FUSELL):
         self.attr[parent]['st_nlink'] -= 1
         del self.attr[ino]
 
+        del self.notes_ino[ino]
+
     def rename_notebook_note_in_fuse(self, notebook_guid, prev_name, new_name):
         parent = self.notebook_ino[notebook_guid]
         self.children[parent][new_name] = self.children[parent][prev_name]
@@ -175,6 +221,9 @@ class EvernoteFuse(FUSELL):
         self.attr[ino] = attr
         self.attr[parent]['st_nlink'] += 1
         self.children[parent][note.title] = ino
+        self.parent[ino] = parent
+
+        self.notes_ino[ino] = note
 
     def add_notebook_notes_to_fuse(self, notebook_guid):
         notebook_notes = self.notebook_notes[notebook_guid]
@@ -243,8 +292,9 @@ class EvernoteFuse(FUSELL):
 
         self.sync_notebooks()
 
+        logging.info('init done')
+
     def getattr(self, req, ino, fi):
-        print('getattr:', ino)
         attr = self.attr[ino]
         if attr:
             self.reply_attr(req, attr, 1.0)
@@ -252,8 +302,6 @@ class EvernoteFuse(FUSELL):
             self.reply_err(req, ENOENT)
 
     def lookup(self, req, parent, name):
-        print('lookup:', parent, name)
-        print(self.children[self.root_ino])
         children = self.children[parent]
         ino = children.get(name, 0)
         attr = self.attr[ino]
@@ -315,6 +363,7 @@ class EvernoteFuse(FUSELL):
         self.attr[ino] = attr
         self.attr[parent]['st_nlink'] += 1
         self.children[parent][name] = ino
+        self.parent[ino] = parent
 
         entry = dict(
             ino=ino,
@@ -325,6 +374,8 @@ class EvernoteFuse(FUSELL):
 
     def open(self, req, ino, fi):
         print('open:', ino)
+        if ino in self.notes_ino:
+            self.sync_note(self.notes_ino[ino])
         self.reply_open(req, fi)
 
     def read(self, req, ino, size, off, fi):
@@ -333,7 +384,6 @@ class EvernoteFuse(FUSELL):
         self.reply_buf(req, buf)
 
     def readdir(self, req, ino, size, off, fi):
-        print('readdir:', ino)
         parent = self.parent[ino]
         entries = [
             ('.', {'st_ino': ino, 'st_mode': S_IFDIR}),

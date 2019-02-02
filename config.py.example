@@ -6,3 +6,4 @@ MOUNT_POINT = '/mnt/evernote'
 
 NOTEBOOK_SYNC_PERIOD = 60 * 60  # once an hour
 NOTES_SYNC_PERIOD = 60 * 60  # once an hour
+NOTE_SYNC_PERIOD = 5 * 60  # 5 minutes
