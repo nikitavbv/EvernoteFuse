@@ -114,8 +114,11 @@ class EvernoteFuse(FUSELL):
         notebook_guid = self.get_notebook_by_ino(self.parent[ino]).guid
         note = self.notes_ino[ino]
         note.title = note_name
+        note.notebookGuid = notebook_guid
         updated_note = self.note_store.updateNote(note)
         self.notes_ino[ino] = updated_note
+        if notebook_guid not in self.notebook_notes:
+            self.notebook_notes[notebook_guid] = {}
         self.notebook_notes[notebook_guid][updated_note.guid] = updated_note
 
     def get_note_content_by_ino(self, ino):
