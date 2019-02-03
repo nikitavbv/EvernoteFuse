@@ -378,8 +378,6 @@ class EvernoteFuse(FUSELL):
             self.reply_err(req, ENOENT)
 
     def mkdir(self, req, parent, name, mode):
-        print('mkdir:', parent, name, mode)
-        # 493 for drwxr-xr-x
         ino = self.create_ino()
         ctx = self.req_ctx(req)
         now = time()
@@ -406,7 +404,6 @@ class EvernoteFuse(FUSELL):
         self.reply_entry(req, entry)
 
     def mknod(self, req, parent, name, mode, rdev):
-        print('mknod:', parent, name, mode, rdev)
         ino = self.create_ino()
         ctx = self.req_ctx(req)
         now = time()
@@ -434,13 +431,11 @@ class EvernoteFuse(FUSELL):
         self.reply_entry(req, entry)
 
     def open(self, req, ino, fi):
-        print('open:', ino)
         if ino in self.notes_ino:
             self.sync_note(self.notes_ino[ino])
         self.reply_open(req, fi)
 
     def read(self, req, ino, size, off, fi):
-        print('read:', ino, size, off)
         buf = self.data[ino][off:(off + size)]
         self.reply_buf(req, buf)
 
@@ -459,7 +454,6 @@ class EvernoteFuse(FUSELL):
         self.reply_readdir(req, size, off, entries)
 
     def rename(self, req, parent, name, newparent, newname):
-        print('rename:', parent, name, newparent, newname)
         ino = self.children[parent].pop(name)
         self.children[newparent][newname] = ino
         self.parent[ino] = newparent
@@ -522,8 +516,6 @@ class EvernoteFuse(FUSELL):
         self.reply_err(req, 0)
 
     def unlink(self, req, parent, name):
-        print('unlink', name)
-
         ino = self.children[parent][name]
 
         if ino in self.note_creation_timers:
